@@ -1,0 +1,177 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# ProxyLLM — Configuration Reference
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Format: TOML  (https://toml.io)
+# Precedence: ENV variables > this file > built-in defaults
+#
+# This file is rewritten automatically when you create, edit, or delete
+# providers or API keys through the admin UI. The [server], [logging],
+# [cache], [mq], and [rate_limit] sections are preserved across UI-driven
+# rewrites; only [provider.*] and [api_keys.*] sections are regenerated.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── HTTP server ───────────────────────────────────────────────────────────────
+[server]
+
+# Listen address. ":8080" binds all interfaces; "127.0.0.1:8080" is local only.
+# ENV: PROXYLLM_SERVER_ADDR
+addr = ":8080"
+
+# Bearer token required for the admin UI and /admin/* API endpoints.
+# Set a strong random value in production.
+# ENV: PROXYLLM_SERVER_ADMIN_TOKEN
+admin_token = "change-me-in-production"
+
+# CORS origins allowed for browser-based API calls.
+cors_origins = ["*"]
+
+# Soft memory ceiling in MB. The Go GC tries to stay under this limit.
+# 0 = no limit.  ENV: PROXYLLM_MAX_MEMORY_MB
+max_memory_mb = 1024
+
+# ── SQLite database ───────────────────────────────────────────────────────────
+# Stores providers, API keys, and all logs.
+# ENV: PROXYLLM_DB_PATH
+db_path = "proxyllm.db"
+
+# ── Global rate limits ────────────────────────────────────────────────────────
+# Global ceiling applied to all traffic combined. 0 = unlimited.
+# Per-provider limits → [provider.<id>.rate_limit]
+# Per-key limits      → [api_keys.<id>.rate_limit]
+[rate_limit]
+tpm         = 0   # tokens per minute — global
+rpm         = 0   # requests per minute — global
+max_retries = 2   # upstream retries before returning error to client
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# Two-tier async logging written to SQLite in batches.
+#   Tier 1 (basic):  one compact row per request — latency, status, tokens.
+#   Tier 2 (detail): full prompt + response body, stored on demand.
+# Retention enforced in order: rows → age → size. 0 = skip that check.
+[logging]
+basic_max_rows     = 0      # max rows (0 = no limit)
+basic_max_days     = 30     # max age in days
+basic_max_size_mb  = 8192   # max size — default 8 GB
+
+detail_max_rows    = 0
+detail_max_days    = 7
+detail_max_size_mb = 2048   # 2 GB
+
+buffer_size        = 4096   # internal channel depth
+flush_interval_ms  = 500    # how often buffered rows are flushed to SQLite
+
+# ── Cache ─────────────────────────────────────────────────────────────────────
+# Stores rate-limit counters. Use Redis for shared state across multiple
+# proxy instances.  type: "memory" (default) | "redis"
+# ENV: PROXYLLM_CACHE_TYPE
+[cache]
+type = "memory"
+
+[cache.redis]
+addr     = ""   # e.g. "127.0.0.1:6379"   ENV: PROXYLLM_CACHE_REDIS_ADDR
+password = ""   # ENV: PROXYLLM_CACHE_REDIS_PASSWORD
+db       = 0    # ENV: PROXYLLM_CACHE_REDIS_DB
+
+# ── Message queue ─────────────────────────────────────────────────────────────
+# Reserved for the async log pipeline. Pick exactly one backend.
+#
+#   memory   — in-process; data lost on restart. Fine for single-instance use.
+#   redis    — persists across restarts; good for moderate volumes.
+#   rabbitmq — durable, fan-out capable; recommended for high-volume production.
+#
+# type: "memory" (default) | "redis" | "rabbitmq"
+# ENV: PROXYLLM_MQ_TYPE
+[mq]
+type = "memory"
+
+[mq.redis]
+addr     = ""   # ENV: PROXYLLM_MQ_REDIS_ADDR
+password = ""   # ENV: PROXYLLM_MQ_REDIS_PASSWORD
+db       = 0    # ENV: PROXYLLM_MQ_REDIS_DB
+
+[mq.rabbitmq]
+url = ""        # e.g. "amqp://admin:secret@127.0.0.1:5672/"  ENV: PROXYLLM_MQ_RABBITMQ_URL
+
+# ── Backend providers ─────────────────────────────────────────────────────────
+# Each [provider.<id>] defines one upstream LLM backend server.
+# The <id> is stable, appears in logs and the admin API, and is used as the
+# TOML key — choose something readable (e.g. "vllm-primary", "gpu-node-02").
+#
+# Core fields:
+#   base_url      Required. HTTP base URL of the upstream (no trailing slash).
+#   aliases       Required. Model names clients send to reach this provider.
+#                 Multiple providers can share an alias; traffic is distributed
+#                 by priority (lower = preferred), then equally within a tier.
+#   api_key       Bearer token sent to the upstream. Omit if not required.
+#   model_name    Actual model name forwarded upstream. Useful when the alias
+#                 and upstream model name differ (e.g. alias "gpt-4" → "Qwen3").
+#   priority      Routing priority. Default 99. Lower = higher preference.
+#                 Providers sharing the same priority receive equal traffic.
+#   endpoint_type "chat" | "embedding" | "all" (default).
+#   timeout_sec   Per-request timeout in seconds. Default 120.
+#   enabled       Set false to remove from rotation without deleting.
+#   override      JSON object deep-merged into every upstream request body.
+#                 Use to enforce parameters such as max_tokens or temperature.
+#
+# Per-provider rate limit (optional — limits traffic this node accepts):
+#   [provider.<id>.rate_limit]
+#   tpm = 0   — tokens per minute (0 = unlimited)
+#   rpm = 0   — requests per minute
+
+[provider.vllm-primary]
+name          = "vLLM Primary"
+aliases       = ["qwen3", "default"]
+base_url      = "http://192.168.168.241:8701"
+api_key       = "12345"
+model_name    = "qwen3"
+priority      = 1
+endpoint_type = "chat"
+timeout_sec   = 120
+enabled       = true
+
+# [provider.vllm-primary.rate_limit]
+# tpm = 100000
+# rpm = 600
+
+# [provider.vllm-primary.override]
+# max_tokens = 4096
+
+[provider.sglang-secondary]
+name          = "SGLang Secondary"
+aliases       = ["qwen3", "default"]
+base_url      = "http://192.168.168.241:8501"
+api_key       = ""
+model_name    = "qwen3"
+priority      = 2
+endpoint_type = "chat"
+timeout_sec   = 120
+enabled       = true
+
+# ── API keys ──────────────────────────────────────────────────────────────────
+# Each [api_keys.<id>] pre-seeds a bearer token into the database on startup.
+# Keys created via the admin UI are also written back here automatically.
+# The <id> is a stable identifier — it does not need to match the key value.
+#
+# Fields:
+#   key          The bearer token clients send: Authorization: Bearer <key>
+#                Any string; stored plaintext in SQLite (local proxy only).
+#                Omit or leave empty to skip this entry.
+#   name         Human-readable label shown in the admin UI.
+#   enabled      Set false to disable without deleting.
+#   allow_models Aliases this key may use. Empty = all models allowed.
+#
+#   [api_keys.<id>.rate_limit]   Optional per-key limit (overrides global).
+#   tpm = 0    tokens per minute (0 = inherit global)
+#   rpm = 0    requests per minute
+#
+# Example:
+# [api_keys.team-alpha]
+# key          = "sk-team-alpha-abc123"
+# name         = "Team Alpha"
+# enabled      = true
+# allow_models = ["qwen3"]
+#
+# [api_keys.team-alpha.rate_limit]
+# tpm = 50000
+# rpm = 200
