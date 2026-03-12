@@ -2,7 +2,7 @@ package memory
 
 import (
 	"context"
-	"encoding/binary"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -96,10 +96,10 @@ func (c *MemoryCache) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-// IncrBy atomically increments the int64 value stored at key by delta and
-// returns the new value. If the key does not exist it is created with
-// value = delta and the given TTL applied. Subsequent calls do NOT reset TTL.
-// The value is stored as an 8-byte big-endian integer.
+// IncrBy atomically increments key by delta and returns the new value.
+// If the key does not exist it is created with value=delta and the given TTL.
+// TTL is only applied on key creation; subsequent calls do NOT reset it.
+// The value is stored as an ASCII string to match Redis behavior.
 func (c *MemoryCache) IncrBy(_ context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -108,9 +108,7 @@ func (c *MemoryCache) IncrBy(_ context.Context, key string, delta int64, ttl tim
 	e, ok := c.entries[key]
 	if !ok || e.expired(now) {
 		// Create a fresh entry.
-		buf := make([]byte, 8)
-		binary.BigEndian.PutUint64(buf, uint64(delta))
-		newEntry := &cacheEntry{value: buf}
+		newEntry := &cacheEntry{value: []byte(strconv.FormatInt(delta, 10))}
 		if ttl > 0 {
 			newEntry.expireAt = now.Add(ttl)
 		}
@@ -120,11 +118,11 @@ func (c *MemoryCache) IncrBy(_ context.Context, key string, delta int64, ttl tim
 
 	// Decode existing value.
 	var current int64
-	if len(e.value) == 8 {
-		current = int64(binary.BigEndian.Uint64(e.value))
+	if len(e.value) > 0 {
+		current, _ = strconv.ParseInt(string(e.value), 10, 64)
 	}
 	current += delta
-	binary.BigEndian.PutUint64(e.value, uint64(current))
+	e.value = []byte(strconv.FormatInt(current, 10))
 	return current, nil
 }
 

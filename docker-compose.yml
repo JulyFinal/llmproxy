@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  proxyllm:
+    build: .
+    container_name: proxyllm
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount data directory for SQLite persistence
+      - ./data:/app/data
+      # (Optional) Mount configuration file if you prefer TOML over ENV vars
+      # - ./config.toml:/app/config.toml
+    environment:
+      - PROXYLLM_DB_PATH=/app/data/proxyllm.db
+      - PROXYLLM_SERVER_ADDR=:8080
+      # IMPORTANT: Change this to a secure token for production!
+      - PROXYLLM_SERVER_ADMIN_TOKEN=super-secret-admin-token
+      # Optional: set memory limit for internal cache / garbage collection hints
+      - PROXYLLM_MAX_MEMORY_MB=1024

@@ -164,6 +164,29 @@ func (l *SQLiteLogger) QueryLogs(ctx context.Context, filter domain.LogFilter) (
 	return out, total, rows.Err()
 }
 
+func (l *SQLiteLogger) ExportLogs(ctx context.Context, filter domain.LogFilter) ([]*domain.RequestLog, error) {
+	where, args := buildLogFilter(filter)
+	query := "SELECT id,session_id,timestamp,api_key_id,model_alias,node_id,actual_model," +
+		"prompt_tokens,completion_tokens,total_tokens,duration_ms,status_code,stream,error_msg,has_detail " +
+		"FROM request_logs" + where + " ORDER BY timestamp DESC"
+
+	rows, err := l.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*domain.RequestLog
+	for rows.Next() {
+		log, err := scanRequestLog(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, log)
+	}
+	return out, rows.Err()
+}
+
 func (l *SQLiteLogger) GetDetail(ctx context.Context, traceID string) (*domain.DetailLog, error) {
 	row := l.db.QueryRowContext(ctx,
 		`SELECT trace_id,session_id,timestamp,request_body,response_body FROM detail_logs WHERE trace_id=?`,
@@ -225,20 +248,113 @@ func (l *SQLiteLogger) PruneDetailLogs(ctx context.Context, maxRows, maxDays int
 	return nil
 }
 
-// Stats returns aggregated metrics for request_logs since the given timestamp.
-func (l *SQLiteLogger) Stats(ctx context.Context, since time.Time) (*domain.LogStats, error) {
+// Stats returns aggregated metrics matching the filter.
+func (l *SQLiteLogger) Stats(ctx context.Context, filter domain.LogFilter) (*domain.LogStats, error) {
+	where, args := buildLogFilter(filter)
 	var s domain.LogStats
-	err := l.db.QueryRowContext(ctx, `
+	query := `
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(prompt_tokens), 0),
 			COALESCE(SUM(completion_tokens), 0),
 			COALESCE(SUM(total_tokens), 0)
-		FROM request_logs
-		WHERE timestamp >= ? AND status_code < 500`,
-		since.UTC().Format(time.RFC3339Nano),
-	).Scan(&s.TotalRequests, &s.PromptTokens, &s.CompletionTokens, &s.TotalTokens)
+		FROM request_logs` + where
+
+	err := l.db.QueryRowContext(ctx, query, args...).Scan(&s.TotalRequests, &s.PromptTokens, &s.CompletionTokens, &s.TotalTokens)
 	return &s, err
+}
+
+// StatsTimeSeries groups metrics by time bucket (hour or day).
+func (l *SQLiteLogger) StatsTimeSeries(ctx context.Context, filter domain.LogFilter, granularity string) ([]*domain.TimeSeriesPoint, error) {
+	where, args := buildLogFilter(filter)
+	
+	// SQLite date format string for truncation
+	var timeFmt string
+	if granularity == "day" {
+		timeFmt = "'%Y-%m-%d 00:00:00Z'"
+	} else {
+		// default to hour
+		timeFmt = "'%Y-%m-%dT%H:00:00Z'"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			strftime(%s, timestamp) as bucket,
+			COUNT(*),
+			COALESCE(SUM(prompt_tokens), 0),
+			COALESCE(SUM(completion_tokens), 0),
+			COALESCE(SUM(total_tokens), 0)
+		FROM request_logs
+		%s
+		GROUP BY bucket
+		ORDER BY bucket ASC
+	`, timeFmt, where)
+
+	rows, err := l.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*domain.TimeSeriesPoint
+	for rows.Next() {
+		var p domain.TimeSeriesPoint
+		var bucket string
+		if err := rows.Scan(&bucket, &p.Requests, &p.PromptTokens, &p.CompletionTokens, &p.TotalTokens); err != nil {
+			return nil, err
+		}
+		// Parse bucket back to time.Time
+		if t, err := time.Parse(time.RFC3339, bucket); err == nil {
+			p.Timestamp = t
+		}
+		out = append(out, &p)
+	}
+	return out, rows.Err()
+}
+
+// StatsTop returns entities with the most token usage. groupBy can be "api_key_id" or "model_alias".
+func (l *SQLiteLogger) StatsTop(ctx context.Context, filter domain.LogFilter, groupBy string, limit int) ([]*domain.TopEntity, error) {
+	where, args := buildLogFilter(filter)
+	
+	// Sanitize groupBy
+	col := "model_alias"
+	if groupBy == "api_key_id" {
+		col = "api_key_id"
+	} else if groupBy == "node_id" {
+		col = "node_id"
+	}
+
+	if limit <= 0 || limit > 100 {
+		limit = 10
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			%s as name,
+			COUNT(*),
+			COALESCE(SUM(total_tokens), 0) as tokens
+		FROM request_logs
+		%s
+		GROUP BY name
+		ORDER BY tokens DESC
+		LIMIT %d
+	`, col, where, limit)
+
+	rows, err := l.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*domain.TopEntity
+	for rows.Next() {
+		var t domain.TopEntity
+		if err := rows.Scan(&t.Name, &t.Requests, &t.TotalTokens); err != nil {
+			return nil, err
+		}
+		out = append(out, &t)
+	}
+	return out, rows.Err()
 }
 
 // RequestLogsSizeBytes estimates the on-disk size of the request_logs table
@@ -336,6 +452,22 @@ func buildLogFilter(f domain.LogFilter) (string, []any) {
 	if f.NodeID != "" {
 		conds = append(conds, "node_id=?")
 		args = append(args, f.NodeID)
+	}
+	if f.SessionID != "" {
+		conds = append(conds, "session_id=?")
+		args = append(args, f.SessionID)
+	}
+	if f.StatusCode > 0 {
+		conds = append(conds, "status_code=?")
+		args = append(args, f.StatusCode)
+	}
+	if f.ErrorOnly {
+		conds = append(conds, "(status_code >= 400 OR error_msg != '')")
+	}
+	if f.Keyword != "" {
+		conds = append(conds, "(error_msg LIKE ? OR id LIKE ?)")
+		kw := "%" + f.Keyword + "%"
+		args = append(args, kw, kw)
 	}
 	if f.StartTime != nil {
 		conds = append(conds, "timestamp >= ?")

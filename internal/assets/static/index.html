@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1260,7 +1260,7 @@ const App = {
       const stClass = status >= 200 && status < 300 ? 'badge-green' : 'badge-red';
       const stream = l.stream ? `<span class="badge badge-cyan">SSE</span>` : '';
       return `<tr onclick="App.openPanel('${escHtml(l.id)}')">
-        <td style="color:var(--text-dim)">${this.fmt.time(l.timestamp)}</td>
+        <td style="color:var(--text-dim); white-space:nowrap">${this.fmt.datetime(l.timestamp)}</td>
         <td style="color:var(--cyan)">${this.fmt.truncate(l.api_key_id || '—', 12)}</td>
         <td>${escHtml(l.model_alias || l.actual_model || '—')}</td>
         <td style="color:var(--text-dim)">${this.fmt.truncate(l.node_id || '—', 10)}</td>
@@ -1309,13 +1309,16 @@ const App = {
         ? `<span class="badge badge-green">● ONLINE</span>`
         : `<span class="badge badge-dim">○ OFFLINE</span>`;
       const aliases = (n.aliases || []).join(', ') || '—';
+      const rl = (n.tpm || n.rpm)
+        ? `${n.tpm ? n.tpm + ' TPM' : '∞'} / ${n.rpm ? n.rpm + ' RPM' : '∞'}`
+        : '<span style="color:var(--text-dim)">unlimited</span>';
       return `<tr id="node-row-${n.id}">
         <td style="color:var(--text-dim);font-size:11px">${this.fmt.truncate(n.id, 8)}</td>
         <td style="color:var(--text-bright)">${escHtml(n.name || '—')}</td>
         <td style="color:var(--cyan);font-size:11px">${escHtml(n.base_url || '—')}</td>
         <td style="color:var(--text-dim);font-size:11px">${escHtml(aliases)}</td>
-        <td style="color:var(--yellow);text-align:center">${n.priority}</td>
         <td><span class="badge badge-dim">${escHtml(n.endpoint_type || 'all')}</span></td>
+        <td style="font-size:11px">${rl}</td>
         <td>${statusBadge}</td>
         <td class="no-click">
           <div id="node-actions-${n.id}">
@@ -1338,7 +1341,7 @@ const App = {
             : `<table>
                 <thead><tr>
                   <th>ID</th><th>NAME</th><th>BASE URL</th><th>ALIASES</th>
-                  <th>PRI</th><th>TYPE</th><th>STATUS</th><th>ACTIONS</th>
+                  <th>TYPE</th><th>LIMITS</th><th>STATUS</th><th>ACTIONS</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
               </table>`
@@ -1377,11 +1380,12 @@ const App = {
             <input class="form-input" id="nf-aliases" value="${escHtml((n.aliases || []).join(', '))}" placeholder="gpt-4o, gpt4">
           </div>
           <div class="form-group">
-            <label class="form-label">Priority</label>
-            <input class="form-input" id="nf-priority" type="number" value="${n.priority !== undefined ? n.priority : 99}" min="0">
+            <label class="form-label">TPM Limit</label>
+            <input class="form-input" id="nf-tpm" type="number" value="${n.tpm || 0}" min="0">
           </div>
           <div class="form-group">
-
+            <label class="form-label">RPM Limit</label>
+            <input class="form-input" id="nf-rpm" type="number" value="${n.rpm || 0}" min="0">
           </div>
           <div class="form-group">
             <label class="form-label">Endpoint Type</label>
@@ -1437,7 +1441,8 @@ const App = {
       api_key:       document.getElementById('nf-api-key').value.trim(),
       model_name:    document.getElementById('nf-model-name').value.trim(),
       aliases,
-      priority:      parseInt(document.getElementById('nf-priority').value, 10) || 99,
+      tpm:           parseInt(document.getElementById('nf-tpm').value, 10) || 0,
+      rpm:           parseInt(document.getElementById('nf-rpm').value, 10) || 0,
       endpoint_type: document.getElementById('nf-endpoint-type').value,
       timeout_sec:   parseInt(document.getElementById('nf-timeout').value, 10) || 30,
       enabled:       document.getElementById('nf-enabled').checked,
@@ -1515,8 +1520,8 @@ const App = {
         ? `<span class="badge badge-green">ACTIVE</span>`
         : `<span class="badge badge-dim">DISABLED</span>`;
       const expires = k.expires_at ? this.fmt.date(k.expires_at) : '<span style="color:var(--text-dim)">never</span>';
-      const rl = k.rate_limit
-        ? `${k.rate_limit.tpm ? k.rate_limit.tpm + ' TPM' : '∞'} / ${k.rate_limit.rpm ? k.rate_limit.rpm + ' RPM' : '∞'}`
+      const rl = (k.tpm || k.rpm)
+        ? `${k.tpm ? k.tpm + ' TPM' : '∞'} / ${k.rpm ? k.rpm + ' RPM' : '∞'}`
         : '<span style="color:var(--text-dim)">unlimited</span>';
       return `<tr id="key-row-${k.id}">
         <td style="color:var(--text-dim);font-size:11px">${this.fmt.truncate(k.id, 8)}</td>
@@ -1599,11 +1604,10 @@ const App = {
     const body = {
       name: document.getElementById('kf-name').value.trim(),
       allow_models: allowModels,
+      tpm,
+      rpm,
     };
     if (keyVal) body.key = keyVal;
-    if (tpm > 0 || rpm > 0) {
-      body.rate_limit = { tpm, rpm };
-    }
 
     try {
       const created = await this.api('POST', `${this.adminBase}/keys`, body);
@@ -1656,6 +1660,16 @@ const App = {
     const f = this._logsFilter;
     const content = document.getElementById('page-content');
 
+    // Helper to format ISO UTC string to local YYYY-MM-DDTHH:mm:ss for <input type="datetime-local">
+    const toLocalInputString = (iso) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return '';
+      const pad = n => String(n).padStart(2, '0');
+      // format: YYYY-MM-DDTHH:mm:ss
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    };
+
     // Build actions
     const arClass = this.autoRefreshActive ? 'btn-orange active' : 'btn-orange';
     document.getElementById('header-actions').innerHTML =
@@ -1689,7 +1703,7 @@ const App = {
       const stream = l.stream ? `<span class="badge badge-cyan">SSE</span>` : '';
       return `<tr onclick="App.openPanel('${escHtml(l.id)}')">
         <td style="color:var(--text-dim);font-size:11px">${this.fmt.truncate(l.id, 8)}</td>
-        <td style="color:var(--text-dim);font-size:11px">${this.fmt.time(l.timestamp)}</td>
+        <td style="color:var(--text-dim);font-size:11px;white-space:nowrap">${this.fmt.datetime(l.timestamp)}</td>
         <td style="color:var(--cyan);font-size:11px">${this.fmt.truncate(l.api_key_id || '—', 10)}</td>
         <td>${escHtml(l.model_alias || '—')}</td>
         <td style="color:var(--text-dim);font-size:11px">${this.fmt.truncate(l.node_id || '—', 10)}</td>
@@ -1713,12 +1727,12 @@ const App = {
           <input class="form-input" id="lf-key-id" value="${escHtml(f.api_key_id || '')}" placeholder="key-id...">
         </div>
         <div class="form-group">
-          <label class="form-label">Start (RFC3339)</label>
-          <input class="form-input" id="lf-start" value="${escHtml(f.start || '')}" placeholder="2024-01-01T00:00:00Z">
+          <label class="form-label">Start (YYYY-MM-DD)</label>
+          <input class="form-input" type="datetime-local" step="1" id="lf-start" lang="zh-CN">
         </div>
         <div class="form-group">
-          <label class="form-label">End (RFC3339)</label>
-          <input class="form-input" id="lf-end" value="${escHtml(f.end || '')}" placeholder="2024-12-31T23:59:59Z">
+          <label class="form-label">End (YYYY-MM-DD)</label>
+          <input class="form-input" type="datetime-local" step="1" id="lf-end" lang="zh-CN">
         </div>
         <div class="form-group shrink">
           <label class="form-label">Page Size</label>
@@ -1729,8 +1743,9 @@ const App = {
             <option value="100" ${(f.page_size||20)===100?'selected':''}>100</option>
           </select>
         </div>
-        <div class="form-group shrink" style="align-self:flex-end">
+        <div class="form-group shrink" style="align-self:flex-end; display:flex; gap:8px">
           <button class="btn btn-green" onclick="App._applyLogsFilter()">[ SEARCH ]</button>
+          <button class="btn btn-dim" onclick="App._exportLogs()">[ EXPORT JSONL ]</button>
         </div>
       </div>
 
@@ -1762,19 +1777,48 @@ const App = {
         </div>
       </div>
     `;
+
+    // Crucial: Set values after the innerHTML is set to ensure the browser accepts the format
+    document.getElementById('lf-start').value = toLocalInputString(f.start);
+    document.getElementById('lf-end').value = toLocalInputString(f.end);
   },
 
   _applyLogsFilter() {
+    const startVal = document.getElementById('lf-start').value;
+    const endVal = document.getElementById('lf-end').value;
+    
     const f = {
       model:      document.getElementById('lf-model').value.trim() || undefined,
       api_key_id: document.getElementById('lf-key-id').value.trim() || undefined,
-      start:      document.getElementById('lf-start').value.trim() || undefined,
-      end:        document.getElementById('lf-end').value.trim() || undefined,
+      // Convert local datetime-local value to Date object then to ISO string (UTC)
+      start:      startVal ? new Date(startVal).toISOString() : undefined,
+      end:        endVal ? new Date(endVal).toISOString() : undefined,
       page_size:  parseInt(document.getElementById('lf-page-size').value, 10) || 20,
       page: 1,
     };
     this._logsFilter = f;
     this._renderLogsPage();
+  },
+
+  _exportLogs() {
+    const f = this._logsFilter || {};
+    const params = new URLSearchParams();
+    if (f.model) params.set('model', f.model);
+    if (f.api_key_id) params.set('api_key_id', f.api_key_id);
+    if (f.start) params.set('start', f.start);
+    if (f.end) params.set('end', f.end);
+    
+    const url = `${this.adminBase}/logs/export?${params.toString()}`;
+    
+    // Trigger download using a hidden link
+    const a = document.createElement('a');
+    a.href = url;
+    // Add token to query because <a> tag doesn't send Authorization header
+    a.href += `&token=${encodeURIComponent(this.token)}`;
+    a.download = `proxyllm_logs_${new Date().toISOString().slice(0,10)}.jsonl`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   },
 
   _logsChangePage(p) {
@@ -1807,20 +1851,23 @@ const App = {
       if (!ts) return '—';
       try {
         const d = new Date(ts);
-        return d.toLocaleTimeString('en-US', { hour12: false });
+        return d.toLocaleTimeString('en-GB', { hour12: false });
       } catch { return '—'; }
     },
     datetime(ts) {
       if (!ts) return '—';
       try {
         const d = new Date(ts);
-        return d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
       } catch { return '—'; }
     },
     date(ts) {
       if (!ts) return '—';
       try {
-        return new Date(ts).toISOString().slice(0, 10);
+        const d = new Date(ts);
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
       } catch { return '—'; }
     },
     tokens(n) {

@@ -1,7 +1,6 @@
 package router
 
 import (
-	"sort"
 	"sync"
 
 	"proxyllm/internal/domain"
@@ -107,11 +106,6 @@ func (r *Router) rebuildAliasIdx() {
 		for _, alias := range n.Aliases {
 			idx[alias] = append(idx[alias], n)
 		}
-	}
-	for alias := range idx {
-		sort.Slice(idx[alias], func(i, j int) bool {
-			return idx[alias][i].Priority < idx[alias][j].Priority
-		})
 	}
 	r.aliasIdx = idx
 }

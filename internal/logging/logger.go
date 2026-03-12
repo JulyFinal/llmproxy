@@ -68,8 +68,21 @@ func (l *AsyncLogger) AsyncLogDetail(log *domain.DetailLog) {
 }
 
 // Stats delegates directly to SQLite (synchronous).
-func (l *AsyncLogger) Stats(ctx context.Context, since time.Time) (*domain.LogStats, error) {
-	return l.sl.Stats(ctx, since)
+func (l *AsyncLogger) Stats(ctx context.Context, filter domain.LogFilter) (*domain.LogStats, error) {
+	return l.sl.Stats(ctx, filter)
+}
+
+func (l *AsyncLogger) StatsTimeSeries(ctx context.Context, filter domain.LogFilter, granularity string) ([]*domain.TimeSeriesPoint, error) {
+	return l.sl.StatsTimeSeries(ctx, filter, granularity)
+}
+
+func (l *AsyncLogger) StatsTop(ctx context.Context, filter domain.LogFilter, groupBy string, limit int) ([]*domain.TopEntity, error) {
+	return l.sl.StatsTop(ctx, filter, groupBy, limit)
+}
+
+// ExportLogs is synchronous and delegates directly to SQLite.
+func (l *AsyncLogger) ExportLogs(ctx context.Context, filter domain.LogFilter) ([]*domain.RequestLog, error) {
+	return l.sl.ExportLogs(ctx, filter)
 }
 
 // QueryLogs is synchronous and delegates directly to SQLite.

@@ -31,8 +31,6 @@
 package config
 
 import (
-	"bytes"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -85,52 +83,17 @@ func Load(path string) (*Config, error) {
 
 // ─── ConfigManager ────────────────────────────────────────────────────────────
 
-// ConfigManager holds the loaded config and writes it back to disk after
-// admin UI mutations (node/key create, update, delete).
+// ConfigManager is retained for API compatibility but no longer writes to config.toml.
+// The file is treated as a read-only startup seed, and runtime state lives in SQLite.
 type ConfigManager struct {
 	mu   sync.Mutex
 	path string
 	cfg  *Config
 }
 
-// NewConfigManager wraps a loaded Config with write-back capability.
+// NewConfigManager wraps a loaded Config.
 func NewConfigManager(path string, cfg *Config) *ConfigManager {
 	return &ConfigManager{path: path, cfg: cfg}
-}
-
-// Save writes the current config with the given nodes and API keys to disk
-// atomically (temp-file + rename). The config file is reconstructed from
-// the in-memory settings plus the provided slices.
-func (m *ConfigManager) Save(nodes []*domain.ModelNode, keys []*domain.APIKey) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	providers := make(map[string]*domain.ModelNode, len(nodes))
-	for _, n := range nodes {
-		providers[n.ID] = n
-	}
-	apiKeys := make(map[string]*domain.APIKey, len(keys))
-	for _, k := range keys {
-		apiKeys[k.ID] = k
-	}
-
-	m.cfg.Providers = providers
-	m.cfg.APIKeys = apiKeys
-
-	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(m.cfg); err != nil {
-		return fmt.Errorf("config marshal: %w", err)
-	}
-
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0644); err != nil {
-		return fmt.Errorf("config write tmp: %w", err)
-	}
-	if err := os.Rename(tmp, m.path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("config rename: %w", err)
-	}
-	return nil
 }
 
 // ─── defaults & env ───────────────────────────────────────────────────────────
@@ -157,6 +120,16 @@ func defaults() *Config {
 			},
 			Cache:     domain.CacheConfig{Type: "memory"},
 			MQ:        domain.MQConfig{Type: "memory"},
+			Queue: domain.QueueConfig{
+				DefaultPriority: 0,
+				MaxQueueSize:    10000,
+			},
+			Worker: domain.WorkerConfig{
+				PoolSize:         10,
+				MaxRetryAttempts: 3,
+				RetryDelayMs:     100,
+				MaxWaitTimeSec:   1800, // 30 minutes
+			},
 			Providers: make(map[string]*domain.ModelNode),
 			APIKeys:   make(map[string]*domain.APIKey),
 		},

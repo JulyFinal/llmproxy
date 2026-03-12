@@ -18,6 +18,8 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"sync"
 	"time"
 
 	"proxyllm/internal/domain"
@@ -26,6 +28,7 @@ import (
 
 // Limiter is the concrete RateLimiter implementation.
 type Limiter struct {
+	mu          sync.RWMutex
 	cache       storage.Cache
 	global      domain.RateLimitConfig
 	modelLimits map[string]domain.RateLimitConfig // alias → config
@@ -33,6 +36,7 @@ type Limiter struct {
 }
 
 // New creates a Limiter.
+//   - cache: the cache backend
 //   - global: app-level defaults
 //   - modelLimits: per-alias overrides (may be nil)
 //   - keyLimits: callback to look up per-key config; return nil to inherit global
@@ -53,13 +57,20 @@ func New(
 	}
 }
 
-// AllowRequest checks RPM budgets for all three layers.
+// UpdateModelLimits replaces the per-model limit table at runtime.
+func (l *Limiter) UpdateModelLimits(limits map[string]domain.RateLimitConfig) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.modelLimits = limits
+}
+
+// AllowRequest checks RPM and TPM budgets for all three layers.
 // Returns (false, nil) when any layer is over budget.
-// Returns (false, err) on internal cache errors.
 func (l *Limiter) AllowRequest(ctx context.Context, keyID, modelAlias string) (bool, error) {
 	ts := windowTimestamp()
 
-	layers := []struct {
+	// 1. Check RPM (synchronous increment)
+	rpmLayers := []struct {
 		key string
 		rpm int
 	}{
@@ -68,21 +79,55 @@ func (l *Limiter) AllowRequest(ctx context.Context, keyID, modelAlias string) (b
 		{rpmKey("key", keyID, ts), l.keyRPM(keyID)},
 	}
 
-	for _, layer := range layers {
+	var incremented []string
+	for _, layer := range rpmLayers {
 		if layer.rpm <= 0 {
-			continue // 0 = unlimited
+			continue
 		}
 		count, err := l.cache.IncrBy(ctx, layer.key, 1, 61*time.Second)
 		if err != nil {
-			return false, fmt.Errorf("ratelimit: cache error: %w", err)
+			l.undo(ctx, incremented)
+			return false, fmt.Errorf("ratelimit: rpm cache error: %w", err)
 		}
+		incremented = append(incremented, layer.key)
 		if count > int64(layer.rpm) {
-			// Undo the increment so we don't consume budget on a rejected request.
-			_, _ = l.cache.IncrBy(ctx, layer.key, -1, 61*time.Second)
+			l.undo(ctx, incremented)
 			return false, nil
 		}
 	}
+
+	// 2. Check TPM (read-only check)
+	tpmLayers := []struct {
+		key string
+		tpm int
+	}{
+		{tpmKey("global", "", ts), l.global.TPM},
+		{tpmKey("model", modelAlias, ts), l.modelTPM(modelAlias)},
+		{tpmKey("key", keyID, ts), l.keyTPM(keyID)},
+	}
+
+	for _, layer := range tpmLayers {
+		if layer.tpm <= 0 {
+			continue
+		}
+		val, ok := l.cache.Get(ctx, layer.key)
+		if !ok {
+			continue
+		}
+		currentTPM, _ := strconv.ParseInt(string(val), 10, 64)
+		if currentTPM >= int64(layer.tpm) {
+			l.undo(ctx, incremented)
+			return false, nil
+		}
+	}
+
 	return true, nil
+}
+
+func (l *Limiter) undo(ctx context.Context, keys []string) {
+	for _, k := range keys {
+		_, _ = l.cache.IncrBy(ctx, k, -1, 61*time.Second)
+	}
 }
 
 // RecordTokens adds actualTokens to the TPM sliding window for all three layers.
@@ -130,8 +175,19 @@ func tpmKey(scope, id string, ts int64) string {
 }
 
 func (l *Limiter) modelRPM(alias string) int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	if cfg, ok := l.modelLimits[alias]; ok {
 		return cfg.RPM
+	}
+	return 0
+}
+
+func (l *Limiter) modelTPM(alias string) int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if cfg, ok := l.modelLimits[alias]; ok {
+		return cfg.TPM
 	}
 	return 0
 }
@@ -145,4 +201,15 @@ func (l *Limiter) keyRPM(keyID string) int {
 		return 0
 	}
 	return cfg.RPM
+}
+
+func (l *Limiter) keyTPM(keyID string) int {
+	if l.keyLimits == nil {
+		return 0
+	}
+	cfg := l.keyLimits(keyID)
+	if cfg == nil {
+		return 0
+	}
+	return cfg.TPM
 }

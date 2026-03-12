@@ -9,6 +9,7 @@ type EndpointType string
 const (
 	EndpointChat      EndpointType = "chat"
 	EndpointEmbedding EndpointType = "embedding"
+	EndpointResponses EndpointType = "responses"
 	EndpointAll       EndpointType = "all"
 )
 
@@ -24,10 +25,10 @@ type ModelNode struct {
 	BaseURL      string           `toml:"base_url"      json:"base_url"`
 	APIKey       string           `toml:"api_key"       json:"api_key"`
 	ModelName    string           `toml:"model_name"    json:"model_name"`
-	Priority     int              `toml:"priority"      json:"priority"`       // lower = higher priority
 	EndpointType EndpointType     `toml:"endpoint_type" json:"endpoint_type"` // "chat" | "embedding" | "all"
-	RateLimit    *RateLimitConfig `toml:"rate_limit"    json:"rate_limit,omitempty"` // nil = no per-node limit
-	Override     map[string]any   `toml:"override"      json:"override"`        // deep-merged into upstream request
+	TPM          int              `toml:"tpm"           json:"tpm"`           // tokens per minute, 0 = unlimited
+	RPM          int              `toml:"rpm"           json:"rpm"`           // requests per minute, 0 = unlimited
+	Override     map[string]any   `toml:"override"      json:"override"`      // deep-merged into upstream request
 	TimeoutSec   int              `toml:"timeout_sec"   json:"timeout_sec"`
 	Enabled      bool             `toml:"enabled"       json:"enabled"`
 	CreatedAt    time.Time        `toml:"-"             json:"created_at"`
@@ -52,8 +53,9 @@ type APIKey struct {
 	Key         string           `toml:"key"          json:"key"`          // plaintext bearer token
 	Name        string           `toml:"name"         json:"name"`
 	Enabled     bool             `toml:"enabled"      json:"enabled"`
-	RateLimit   *RateLimitConfig `toml:"rate_limit"   json:"rate_limit,omitempty"` // nil = inherit global
-	AllowModels []string         `toml:"allow_models" json:"allow_models"`          // empty = all models
+	TPM         int              `toml:"tpm"          json:"tpm"`          // tokens per minute, 0 = inherit global
+	RPM         int              `toml:"rpm"          json:"rpm"`          // requests per minute, 0 = inherit global
+	AllowModels []string         `toml:"allow_models" json:"allow_models"` // empty = all models
 	CreatedAt   time.Time        `toml:"-"            json:"created_at"`
 	ExpiresAt   *time.Time       `toml:"-"            json:"expires_at,omitempty"`
 }
@@ -119,8 +121,26 @@ type AppConfig struct {
 	Logging   LoggingConfig               `toml:"logging"`
 	Cache     CacheConfig                 `toml:"cache"`
 	MQ        MQConfig                    `toml:"mq"`
+	Queue     QueueConfig                 `toml:"queue"`
+	Worker    WorkerConfig                `toml:"worker"`
 	Providers map[string]*ModelNode       `toml:"provider"`
 	APIKeys   map[string]*APIKey          `toml:"api_keys"`
+}
+
+// ─── Queue config ─────────────────────────────────────────────────────────────
+
+type QueueConfig struct {
+	DefaultPriority int `toml:"default_priority"`
+	MaxQueueSize    int `toml:"max_queue_size"`
+}
+
+// ─── Worker config ────────────────────────────────────────────────────────────
+
+type WorkerConfig struct {
+	PoolSize             int   `toml:"pool_size"`
+	MaxRetryAttempts     int   `toml:"max_retry_attempts"`
+	RetryDelayMs         int   `toml:"retry_delay_ms"`
+	MaxWaitTimeSec       int   `toml:"max_wait_time_sec"`
 }
 
 // ─── Request context ──────────────────────────────────────────────────────────
@@ -174,8 +194,26 @@ type LogFilter struct {
 	APIKeyID   string
 	ModelAlias string
 	NodeID     string
+	SessionID  string
+	StatusCode int
+	ErrorOnly  bool
+	Keyword    string
 	StartTime  *time.Time
 	EndTime    *time.Time
 	Page       int
 	PageSize   int
+}
+
+type TimeSeriesPoint struct {
+	Timestamp        time.Time `json:"timestamp"`
+	Requests         int64     `json:"requests"`
+	PromptTokens     int64     `json:"prompt_tokens"`
+	CompletionTokens int64     `json:"completion_tokens"`
+	TotalTokens      int64     `json:"total_tokens"`
+}
+
+type TopEntity struct {
+	Name        string `json:"name"`
+	Requests    int64  `json:"requests"`
+	TotalTokens int64  `json:"total_tokens"`
 }

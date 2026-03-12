@@ -18,6 +18,7 @@ type Storage interface {
 
 	// API Keys
 	UpsertAPIKey(ctx context.Context, key *domain.APIKey) error
+	GetAPIKey(ctx context.Context, id string) (*domain.APIKey, error)
 	GetAPIKeyByValue(ctx context.Context, keyValue string) (*domain.APIKey, error)
 	ListAPIKeys(ctx context.Context) ([]*domain.APIKey, error)
 	DeleteAPIKey(ctx context.Context, id string) error
@@ -76,11 +77,20 @@ type Logger interface {
 	// QueryLogs is called by the admin API (synchronous).
 	QueryLogs(ctx context.Context, filter domain.LogFilter) ([]*domain.RequestLog, int64, error)
 
+	// ExportLogs returns all logs matching the filter without pagination.
+	ExportLogs(ctx context.Context, filter domain.LogFilter) ([]*domain.RequestLog, error)
+
 	// GetDetail loads a single detail log by TraceID (synchronous).
 	GetDetail(ctx context.Context, traceID string) (*domain.DetailLog, error)
 
-	// Stats returns aggregate metrics since the given time (used by dashboard).
-	Stats(ctx context.Context, since time.Time) (*domain.LogStats, error)
+	// Stats returns aggregate metrics matching the filter.
+	Stats(ctx context.Context, filter domain.LogFilter) (*domain.LogStats, error)
+
+	// StatsTimeSeries returns time-bucketed metrics. granularity can be "hour" or "day".
+	StatsTimeSeries(ctx context.Context, filter domain.LogFilter, granularity string) ([]*domain.TimeSeriesPoint, error)
+
+	// StatsTop returns the top entities (models or api_keys) ranked by token usage.
+	StatsTop(ctx context.Context, filter domain.LogFilter, groupBy string, limit int) ([]*domain.TopEntity, error)
 
 	// Flush drains the internal buffers and commits pending writes to storage.
 	// Called during graceful shutdown.

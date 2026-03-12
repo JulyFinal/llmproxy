@@ -15,6 +15,7 @@ import (
 	"proxyllm/internal/domain"
 	"proxyllm/internal/logging"
 	"proxyllm/internal/proxy"
+	"proxyllm/internal/queue"
 	"proxyllm/internal/ratelimit"
 	"proxyllm/internal/router"
 	"proxyllm/internal/storage"
@@ -22,6 +23,7 @@ import (
 	"proxyllm/internal/storage/rabbitmq"
 	redistore "proxyllm/internal/storage/redis"
 	"proxyllm/internal/storage/sqlite"
+	"proxyllm/internal/worker"
 )
 
 func main() {
@@ -70,8 +72,8 @@ func main() {
 	}
 
 	// ── Queue ─────────────────────────────────────────────────────────────────
-	queue := buildQueue(cfg, slog.Default())
-	_ = queue // reserved for future async log pipeline
+	msgQueue := buildQueue(cfg, slog.Default())
+	_ = msgQueue // reserved for future async log pipeline
 
 	// ── Logger (async two-tier) ───────────────────────────────────────────────
 	flushInterval := time.Duration(cfg.Logging.FlushIntervalMs) * time.Millisecond
@@ -104,7 +106,6 @@ func main() {
 		if k.AllowModels == nil {
 			k.AllowModels = []string{}
 		}
-		k.Enabled = true
 		_ = store.UpsertAPIKey(ctx, k)
 	}
 
@@ -120,24 +121,44 @@ func main() {
 	// Build per-alias model limits from provider node configs.
 	modelLimits := make(map[string]domain.RateLimitConfig)
 	for _, node := range dbNodes {
-		if node.RateLimit == nil {
+		if node.TPM <= 0 && node.RPM <= 0 {
 			continue
 		}
 		for _, alias := range node.Aliases {
 			if _, exists := modelLimits[alias]; !exists {
-				modelLimits[alias] = *node.RateLimit
+				modelLimits[alias] = domain.RateLimitConfig{TPM: node.TPM, RPM: node.RPM}
 			}
 		}
 	}
 
 	keyLimits := func(keyID string) *domain.RateLimitConfig {
-		k, err := store.GetAPIKeyByValue(ctx, keyID)
-		if err != nil || k == nil {
+		k, err := store.GetAPIKey(ctx, keyID)
+		if err != nil || k == nil || (k.TPM <= 0 && k.RPM <= 0) {
 			return nil
 		}
-		return k.RateLimit
+		return &domain.RateLimitConfig{TPM: k.TPM, RPM: k.RPM}
 	}
 	limiter := ratelimit.New(cache, cfg.RateLimit, modelLimits, keyLimits)
+
+	// ── Queue & Worker Pool ───────────────────────────────────────────────────
+	reqQueue := queue.NewRequestQueue(cfg.Queue.MaxQueueSize)
+	chainLogger := logging.NewChainLogger(asyncLogger)
+	p := proxy.New()
+	
+	workerPool := worker.NewWorkerPool(
+		reqQueue,
+		rt,
+		p,
+		limiter,
+		chainLogger,
+		&worker.WorkerConfig{
+			WorkerCount:      cfg.Worker.PoolSize,
+			MaxRetryAttempts: cfg.Worker.MaxRetryAttempts,
+			RetryDelayMs:     cfg.Worker.RetryDelayMs,
+			MaxWaitTime:      time.Duration(cfg.Worker.MaxWaitTimeSec) * time.Second,
+		},
+	)
+	workerPool.Start()
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 	srv := api.NewServer(api.Deps{
@@ -151,12 +172,14 @@ func main() {
 			Addr:        cfg.Server.Addr,
 			CORSOrigins: cfg.Server.CORSOrigins,
 		},
-		Store:   store,
-		Router:  rt,
-		Proxy:   proxy.New(),
-		Limiter: limiter,
-		Logger:  asyncLogger,
-		CfgMgr:  cfgMgr,
+		Store:       store,
+		Router:      rt,
+		Proxy:       p,
+		Limiter:     limiter,
+		Logger:      asyncLogger,
+		ChainLogger: chainLogger,
+		Queue:       reqQueue,
+		CfgMgr:      cfgMgr,
 	})
 
 	// ── Graceful shutdown ─────────────────────────────────────────────────────
@@ -172,6 +195,8 @@ func main() {
 	<-sigCh
 	slog.Info("signal received, shutting down gracefully...")
 
+	workerPool.Stop()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -181,7 +206,7 @@ func main() {
 
 	cleaner.Stop()
 	cache.Close()
-	queue.Close()
+	msgQueue.Close()
 	asyncLogger.Close()
 	db.Close()
 

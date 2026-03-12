@@ -5,10 +5,10 @@
 # Format: TOML  (https://toml.io)
 # Precedence: ENV variables > this file > built-in defaults
 #
-# This file is rewritten automatically when you create, edit, or delete
-# providers or API keys through the admin UI. The [server], [logging],
-# [cache], [mq], and [rate_limit] sections are preserved across UI-driven
-# rewrites; only [provider.*] and [api_keys.*] sections are regenerated.
+# NOTE: This file acts as an INITIALIZATION SEED. 
+# ProxyLLM loads these values on startup and merges them into its SQLite database. 
+# Runtime mutations (via Admin UI) are saved to SQLite safely and will NOT 
+# overwrite this file, preserving your comments and formatting.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── HTTP server ───────────────────────────────────────────────────────────────
@@ -21,7 +21,7 @@ addr = ":8080"
 # Bearer token required for the admin UI and /admin/* API endpoints.
 # Set a strong random value in production.
 # ENV: PROXYLLM_SERVER_ADMIN_TOKEN
-admin_token = "change-me-in-production"
+admin_token = "admin"
 
 # CORS origins allowed for browser-based API calls.
 cors_origins = ["*"]
@@ -37,12 +37,24 @@ db_path = "proxyllm.db"
 
 # ── Global rate limits ────────────────────────────────────────────────────────
 # Global ceiling applied to all traffic combined. 0 = unlimited.
-# Per-provider limits → [provider.<id>.rate_limit]
-# Per-key limits      → [api_keys.<id>.rate_limit]
 [rate_limit]
 tpm         = 0   # tokens per minute — global
 rpm         = 0   # requests per minute — global
-max_retries = 2   # upstream retries before returning error to client
+
+# ── Worker Pool & Retry System ────────────────────────────────────────────────
+# Configuration for the concurrent worker pool that processes OpenAI API requests.
+# It handles load balancing, intelligent retries, and streaming.
+[worker]
+pool_size          = 10     # Number of concurrent workers processing the queue.
+max_retry_attempts = 3      # Maximum number of times a request will try different nodes on 5xx/429 errors.
+retry_delay_ms     = 100    # Backoff delay in milliseconds between retries.
+max_wait_time_sec  = 1800   # Maximum time (in seconds) a request can sit in the queue before timing out (default 30m).
+
+# ── Priority Queue ────────────────────────────────────────────────────────────
+# Configuration for the internal multi-model priority queue.
+[queue]
+default_priority = 0      # Default priority for incoming requests if not specified by the client.
+max_queue_size   = 10000  # Maximum number of requests allowed in the queue before rejecting new ones.
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Two-tier async logging written to SQLite in batches.
@@ -102,22 +114,17 @@ url = ""        # e.g. "amqp://admin:secret@127.0.0.1:5672/"  ENV: PROXYLLM_MQ_R
 #   base_url      Required. HTTP base URL of the upstream (no trailing slash).
 #   aliases       Required. Model names clients send to reach this provider.
 #                 Multiple providers can share an alias; traffic is distributed
-#                 by priority (lower = preferred), then equally within a tier.
+#                 equally among healthy nodes.
 #   api_key       Bearer token sent to the upstream. Omit if not required.
 #   model_name    Actual model name forwarded upstream. Useful when the alias
 #                 and upstream model name differ (e.g. alias "gpt-4" → "Qwen3").
-#   priority      Routing priority. Default 99. Lower = higher preference.
-#                 Providers sharing the same priority receive equal traffic.
 #   endpoint_type "chat" | "embedding" | "all" (default).
+#   tpm           Tokens Per Minute limit for this specific node (0 = unlimited).
+#   rpm           Requests Per Minute limit for this specific node (0 = unlimited).
 #   timeout_sec   Per-request timeout in seconds. Default 120.
 #   enabled       Set false to remove from rotation without deleting.
 #   override      JSON object deep-merged into every upstream request body.
 #                 Use to enforce parameters such as max_tokens or temperature.
-#
-# Per-provider rate limit (optional — limits traffic this node accepts):
-#   [provider.<id>.rate_limit]
-#   tpm = 0   — tokens per minute (0 = unlimited)
-#   rpm = 0   — requests per minute
 
 [provider.vllm-primary]
 name          = "vLLM Primary"
@@ -125,14 +132,11 @@ aliases       = ["qwen3", "default"]
 base_url      = "http://192.168.168.241:8701"
 api_key       = "12345"
 model_name    = "qwen3"
-priority      = 1
 endpoint_type = "chat"
+tpm           = 100000
+rpm           = 600
 timeout_sec   = 120
 enabled       = true
-
-# [provider.vllm-primary.rate_limit]
-# tpm = 100000
-# rpm = 600
 
 # [provider.vllm-primary.override]
 # max_tokens = 4096
@@ -143,35 +147,27 @@ aliases       = ["qwen3", "default"]
 base_url      = "http://192.168.168.241:8501"
 api_key       = ""
 model_name    = "qwen3"
-priority      = 2
 endpoint_type = "chat"
 timeout_sec   = 120
 enabled       = true
 
 # ── API keys ──────────────────────────────────────────────────────────────────
 # Each [api_keys.<id>] pre-seeds a bearer token into the database on startup.
-# Keys created via the admin UI are also written back here automatically.
 # The <id> is a stable identifier — it does not need to match the key value.
 #
 # Fields:
 #   key          The bearer token clients send: Authorization: Bearer <key>
 #                Any string; stored plaintext in SQLite (local proxy only).
-#                Omit or leave empty to skip this entry.
-#   name         Human-readable label shown in the admin UI.
-#   enabled      Set false to disable without deleting.
-#   allow_models Aliases this key may use. Empty = all models allowed.
-#
-#   [api_keys.<id>.rate_limit]   Optional per-key limit (overrides global).
-#   tpm = 0    tokens per minute (0 = inherit global)
-#   rpm = 0    requests per minute
-#
-# Example:
-# [api_keys.team-alpha]
-# key          = "sk-team-alpha-abc123"
-# name         = "Team Alpha"
-# enabled      = true
-# allow_models = ["qwen3"]
-#
-# [api_keys.team-alpha.rate_limit]
-# tpm = 50000
-# rpm = 200
+#   name         Human-readable description.
+#   enabled      If false, the key is blocked.
+#   tpm          Tokens per minute allowed for this key. (0 = unlimited/inherit)
+#   rpm          Requests per minute allowed for this key. (0 = unlimited/inherit)
+#   allow_models Array of allowed model aliases. Empty [] means all models.
+
+[api_keys.f97472506705c878]
+key          = "sk-pre-configured-key"
+name         = "Pre-seeded Team Key"
+enabled      = true
+tpm          = 0
+rpm          = 0
+allow_models = []

@@ -42,9 +42,9 @@ func migrate(db *sql.DB) error {
 			base_url      TEXT NOT NULL,
 			api_key       TEXT NOT NULL DEFAULT '',
 			model_name    TEXT NOT NULL DEFAULT '',
-			priority      INTEGER NOT NULL DEFAULT 99,
-			weight        INTEGER NOT NULL DEFAULT 1,
 			endpoint_type TEXT NOT NULL DEFAULT 'all',
+			tpm           INTEGER NOT NULL DEFAULT 0,
+			rpm           INTEGER NOT NULL DEFAULT 0,
 			override      TEXT NOT NULL DEFAULT '{}',
 			timeout_sec   INTEGER NOT NULL DEFAULT 120,
 			enabled       INTEGER NOT NULL DEFAULT 1,
@@ -94,8 +94,12 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	// Add rate_limit column if upgrading from an older schema.
-	_, _ = db.Exec(`ALTER TABLE model_nodes ADD COLUMN rate_limit TEXT`)
+	// Add columns if upgrading from older schema.
+	_, _ = db.Exec(`ALTER TABLE model_nodes ADD COLUMN rate_limit TEXT`) // keep for legacy
+	_, _ = db.Exec(`ALTER TABLE model_nodes ADD COLUMN tpm INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE model_nodes ADD COLUMN rpm INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE api_keys ADD COLUMN tpm INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE api_keys ADD COLUMN rpm INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
 
@@ -119,39 +123,32 @@ func (s *SQLiteStorage) UpsertNode(ctx context.Context, n *domain.ModelNode) err
 		n.CreatedAt = now
 	}
 	n.UpdatedAt = now
-	var rateLimitJSON *string
-	if n.RateLimit != nil {
-		b, _ := json.Marshal(n.RateLimit)
-		str := string(b)
-		rateLimitJSON = &str
-	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO model_nodes
-			(id,name,aliases,base_url,api_key,model_name,priority,weight,endpoint_type,override,timeout_sec,enabled,created_at,updated_at,rate_limit)
-		VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)
+			(id,name,aliases,base_url,api_key,model_name,endpoint_type,override,timeout_sec,enabled,created_at,updated_at,tpm,rpm)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, aliases=excluded.aliases, base_url=excluded.base_url,
 			api_key=excluded.api_key, model_name=excluded.model_name,
-			priority=excluded.priority,
 			endpoint_type=excluded.endpoint_type, override=excluded.override,
 			timeout_sec=excluded.timeout_sec, enabled=excluded.enabled,
-			updated_at=excluded.updated_at, rate_limit=excluded.rate_limit`,
+			updated_at=excluded.updated_at, tpm=excluded.tpm, rpm=excluded.rpm`,
 		n.ID, n.Name, string(aliases), n.BaseURL, n.APIKey, n.ModelName,
-		n.Priority, string(n.EndpointType), string(override),
+		string(n.EndpointType), string(override),
 		n.TimeoutSec, boolToInt(n.Enabled),
 		n.CreatedAt.Format(time.RFC3339Nano), n.UpdatedAt.Format(time.RFC3339Nano),
-		rateLimitJSON,
+		n.TPM, n.RPM,
 	)
 	return err
 }
 
 func (s *SQLiteStorage) GetNode(ctx context.Context, id string) (*domain.ModelNode, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT * FROM model_nodes WHERE id=?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, aliases, base_url, api_key, model_name, endpoint_type, tpm, rpm, override, timeout_sec, enabled, created_at, updated_at FROM model_nodes WHERE id=?`, id)
 	return scanNode(row)
 }
 
 func (s *SQLiteStorage) ListNodes(ctx context.Context) ([]*domain.ModelNode, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT * FROM model_nodes ORDER BY priority ASC, name ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, aliases, base_url, api_key, model_name, endpoint_type, tpm, rpm, override, timeout_sec, enabled, created_at, updated_at FROM model_nodes ORDER BY name ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -176,12 +173,6 @@ func (s *SQLiteStorage) DeleteNode(ctx context.Context, id string) error {
 
 func (s *SQLiteStorage) UpsertAPIKey(ctx context.Context, k *domain.APIKey) error {
 	allowModels, _ := json.Marshal(k.AllowModels)
-	var rl *string
-	if k.RateLimit != nil {
-		b, _ := json.Marshal(k.RateLimit)
-		str := string(b)
-		rl = &str
-	}
 	var expiresAt *string
 	if k.ExpiresAt != nil {
 		str := k.ExpiresAt.UTC().Format(time.RFC3339Nano)
@@ -191,25 +182,30 @@ func (s *SQLiteStorage) UpsertAPIKey(ctx context.Context, k *domain.APIKey) erro
 		k.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO api_keys (id,key_value,name,enabled,rate_limit,allow_models,created_at,expires_at)
-		VALUES (?,?,?,?,?,?,?,?)
+		INSERT INTO api_keys (id,key_value,name,enabled,tpm,rpm,allow_models,created_at,expires_at)
+		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			key_value=excluded.key_value, name=excluded.name, enabled=excluded.enabled,
-			rate_limit=excluded.rate_limit, allow_models=excluded.allow_models,
+			tpm=excluded.tpm, rpm=excluded.rpm, allow_models=excluded.allow_models,
 			expires_at=excluded.expires_at`,
-		k.ID, k.Key, k.Name, boolToInt(k.Enabled), rl, string(allowModels),
+		k.ID, k.Key, k.Name, boolToInt(k.Enabled), k.TPM, k.RPM, string(allowModels),
 		k.CreatedAt.UTC().Format(time.RFC3339Nano), expiresAt,
 	)
 	return err
 }
 
+func (s *SQLiteStorage) GetAPIKey(ctx context.Context, id string) (*domain.APIKey, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, key_value, name, enabled, tpm, rpm, allow_models, created_at, expires_at FROM api_keys WHERE id=?`, id)
+	return scanAPIKey(row)
+}
+
 func (s *SQLiteStorage) GetAPIKeyByValue(ctx context.Context, keyValue string) (*domain.APIKey, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT * FROM api_keys WHERE key_value=?`, keyValue)
+	row := s.db.QueryRowContext(ctx, `SELECT id, key_value, name, enabled, tpm, rpm, allow_models, created_at, expires_at FROM api_keys WHERE key_value=?`, keyValue)
 	return scanAPIKey(row)
 }
 
 func (s *SQLiteStorage) ListAPIKeys(ctx context.Context) ([]*domain.APIKey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT * FROM api_keys ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, key_value, name, enabled, tpm, rpm, allow_models, created_at, expires_at FROM api_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -241,12 +237,11 @@ type scanner interface {
 func scanNode(s scanner) (*domain.ModelNode, error) {
 	var n domain.ModelNode
 	var aliases, override, endpointType, createdAt, updatedAt string
-	var enabled, weightDiscard int
-	var rateLimitStr sql.NullString
+	var enabled int
 	err := s.Scan(
 		&n.ID, &n.Name, &aliases, &n.BaseURL, &n.APIKey, &n.ModelName,
-		&n.Priority, &weightDiscard, &endpointType, &override,
-		&n.TimeoutSec, &enabled, &createdAt, &updatedAt, &rateLimitStr,
+		&endpointType, &n.TPM, &n.RPM, &override,
+		&n.TimeoutSec, &enabled, &createdAt, &updatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -260,21 +255,16 @@ func scanNode(s scanner) (*domain.ModelNode, error) {
 	_ = json.Unmarshal([]byte(override), &n.Override)
 	n.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	n.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
-	if rateLimitStr.Valid && rateLimitStr.String != "" {
-		var rl domain.RateLimitConfig
-		_ = json.Unmarshal([]byte(rateLimitStr.String), &rl)
-		n.RateLimit = &rl
-	}
 	return &n, nil
 }
 
 func scanAPIKey(s scanner) (*domain.APIKey, error) {
 	var k domain.APIKey
 	var enabled int
-	var rl, expiresAt sql.NullString
+	var expiresAt sql.NullString
 	var allowModels, createdAt string
 	err := s.Scan(
-		&k.ID, &k.Key, &k.Name, &enabled, &rl, &allowModels, &createdAt, &expiresAt,
+		&k.ID, &k.Key, &k.Name, &enabled, &k.TPM, &k.RPM, &allowModels, &createdAt, &expiresAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -285,11 +275,6 @@ func scanAPIKey(s scanner) (*domain.APIKey, error) {
 	k.Enabled = enabled != 0
 	_ = json.Unmarshal([]byte(allowModels), &k.AllowModels)
 	k.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	if rl.Valid && rl.String != "" {
-		var cfg domain.RateLimitConfig
-		_ = json.Unmarshal([]byte(rl.String), &cfg)
-		k.RateLimit = &cfg
-	}
 	if expiresAt.Valid && expiresAt.String != "" {
 		t, _ := time.Parse(time.RFC3339Nano, expiresAt.String)
 		k.ExpiresAt = &t

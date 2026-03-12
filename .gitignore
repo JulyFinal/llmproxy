@@ -1,0 +1,39 @@
+# Binaries
+/proxyllm
+/mock_upstream
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage artifacts
+*.test
+*.out
+/coverage.txt
+
+# Databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+/logs/
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Go specific
+/vendor/
+go.sum.old
+
+# Local Data / Config
+/data/
+.env
+.env.local

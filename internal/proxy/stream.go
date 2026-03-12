@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -38,6 +37,9 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, resp *http.Respon
 	var usageFound bool
 
 	scanner := bufio.NewScanner(resp.Body)
+	// Default buffer is 64K; increase to 10MB for large chunks (tool calls, structured output).
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 10*1024*1024)
 	for scanner.Scan() {
 		// Honour context cancellation between lines.
 		select {
@@ -77,22 +79,41 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, resp *http.Respon
 				CompletionTokens int `json:"completion_tokens"`
 			} `json:"usage"`
 		}
-		if err := json.NewDecoder(bytes.NewReader([]byte(payload))).Decode(&chunk); err != nil {
-			continue
+		// Also try SGLang responses style
+		var sgChunk struct {
+			Response struct {
+				Usage struct {
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
+			} `json:"response"`
 		}
 
-		// Accumulate usage from the final chunk that carries it.
-		if chunk.Usage != nil {
-			result.PromptTokens = chunk.Usage.PromptTokens
-			result.CompletionTokens = chunk.Usage.CompletionTokens
-			usageFound = true
+		rawPayload := []byte(payload)
+		if err := json.Unmarshal(rawPayload, &chunk); err == nil {
+			// Accumulate usage from the final chunk that carries it (OpenAI style).
+			if chunk.Usage != nil {
+				result.PromptTokens = chunk.Usage.PromptTokens
+				result.CompletionTokens = chunk.Usage.CompletionTokens
+				usageFound = true
+			}
+
+			// Accumulate delta content regardless; used as fallback token estimate.
+			for _, choice := range chunk.Choices {
+				if choice.Delta.Content != "" {
+					accumulatedContent.WriteString(choice.Delta.Content)
+					result.FullContent.WriteString(choice.Delta.Content)
+				}
+			}
 		}
 
-		// Accumulate delta content regardless; used as fallback token estimate.
-		for _, choice := range chunk.Choices {
-			if choice.Delta.Content != "" {
-				accumulatedContent.WriteString(choice.Delta.Content)
-				result.FullContent.WriteString(choice.Delta.Content)
+		if !usageFound {
+			if err := json.Unmarshal(rawPayload, &sgChunk); err == nil {
+				if sgChunk.Response.Usage.InputTokens > 0 {
+					result.PromptTokens = sgChunk.Response.Usage.InputTokens
+					result.CompletionTokens = sgChunk.Response.Usage.OutputTokens
+					usageFound = true
+				}
 			}
 		}
 	}

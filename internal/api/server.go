@@ -10,7 +10,9 @@ import (
 	"proxyllm/internal/auth"
 	"proxyllm/internal/config"
 	"proxyllm/internal/domain"
+	"proxyllm/internal/logging"
 	"proxyllm/internal/proxy"
+	"proxyllm/internal/queue"
 	"proxyllm/internal/ratelimit"
 	"proxyllm/internal/router"
 	"proxyllm/internal/storage"
@@ -24,14 +26,16 @@ type Server struct {
 
 // Deps groups all resolved dependencies needed to build the server.
 type Deps struct {
-	Config    *domain.AppConfig
-	AdminCfg  struct{ Token string; Addr string; CORSOrigins []string }
-	Store     storage.Storage
-	Router    *router.Router
-	Proxy     *proxy.Proxy
-	Limiter   *ratelimit.Limiter
-	Logger    storage.Logger
-	CfgMgr    *config.ConfigManager
+	Config      *domain.AppConfig
+	AdminCfg    struct{ Token string; Addr string; CORSOrigins []string }
+	Store       storage.Storage
+	Router      *router.Router
+	Proxy       *proxy.Proxy
+	Limiter     *ratelimit.Limiter
+	Logger      storage.Logger
+	ChainLogger *logging.ChainLogger
+	Queue       *queue.RequestQueue
+	CfgMgr      *config.ConfigManager
 }
 
 func NewServer(deps Deps) *Server {
@@ -61,10 +65,10 @@ func NewServer(deps Deps) *Server {
 	}
 
 	// Register route groups
-	oaiHandler := NewOpenAIHandler(deps.Router, deps.Proxy, deps.Limiter, deps.Logger)
+	oaiHandler := NewOpenAIHandler(deps.Router, deps.Limiter, deps.Logger, deps.ChainLogger, deps.Queue, deps.Config)
 	oaiHandler.RegisterRoutes(mux, openAIMW)
 
-	adminHandler := NewAdminHandler(deps.Store, deps.Router, deps.Logger, deps.CfgMgr)
+	adminHandler := NewAdminHandler(deps.Store, deps.Router, deps.Limiter, deps.Logger, deps.CfgMgr)
 	adminHandler.RegisterRoutes(mux, adminMW)
 
 	// Health check (no auth)

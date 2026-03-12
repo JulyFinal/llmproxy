@@ -95,11 +95,16 @@ func adminAuthMiddleware(adminToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if adminToken == "" {
-				// No admin token configured: allow all (local-only use case)
-				next.ServeHTTP(w, r)
+				slog.Warn("admin access denied: admin_token is not configured in config.toml")
+				writeError(w, http.StatusForbidden, "admin access disabled: no admin_token configured")
 				return
 			}
 			token, ok := auth.ExtractToken(r)
+			if !ok {
+				// Fallback to query parameter for GET requests (e.g. file downloads)
+				token = r.URL.Query().Get("token")
+				ok = token != ""
+			}
 			if !ok || token != adminToken {
 				writeError(w, http.StatusUnauthorized, "unauthorized")
 				return

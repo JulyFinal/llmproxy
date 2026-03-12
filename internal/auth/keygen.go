@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"math/big"
+	mathrand "math/rand"
+	"time"
 )
 
 const base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -17,9 +19,10 @@ func GenerateKey() string {
 	for i := range result {
 		n, err := rand.Int(rand.Reader, alphabetLen)
 		if err != nil {
-			panic("auth: crypto/rand failed: " + err.Error())
+			result[i] = base62Chars[mathrand.Intn(len(base62Chars))]
+		} else {
+			result[i] = base62Chars[n.Int64()]
 		}
-		result[i] = base62Chars[n.Int64()]
 	}
 	return "pk-" + string(result)
 }
@@ -28,7 +31,9 @@ func GenerateKey() string {
 func GenerateID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		panic("auth: crypto/rand failed: " + err.Error())
+		// Fallback if crypto/rand fails
+		mathrand.Seed(time.Now().UnixNano())
+		mathrand.Read(b)
 	}
 	return hex.EncodeToString(b)
 }
