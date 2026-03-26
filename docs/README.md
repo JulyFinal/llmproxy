@@ -1,140 +1,173 @@
-# ProxyLLM Documentation
+# ProxyLLM
 
-Welcome to the ProxyLLM documentation. This directory contains comprehensive guides for understanding, deploying, and developing ProxyLLM.
+ProxyLLM is a high-performance, OpenAI-compatible API proxy and load balancer for managing multiple LLM backends.
 
----
+It provides seamless routing, intelligent request queuing, comprehensive rate limiting (RPM & TPM), automatic retry with failover, Prometheus metrics, and detailed logging — ideal for teams consolidating API keys and managing model traffic.
 
-## 📚 Documentation Index
+## Features
 
-### Getting Started
-- **[Main README](../README.md)** - Quick start guide and basic usage
-- **[Architecture & Features](./guide.md)** - System architecture and core features overview
+### Core
+- **OpenAI Compatible** — Drop-in replacement for any app using the OpenAI API format (`/v1/chat/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`).
+- **Priority Queue** — Higher-priority requests are processed first. Configurable max queue size and wait time.
+- **Smart Retry & Failover** — Automatic node switching on 5xx, 429, timeout, or connection errors.
+- **Load Balancing** — Random selection across healthy nodes with per-request exclusion on failure.
+- **Sliding Window Rate Limiting** — Three-layer (Global → Model → API Key) enforcement of RPM and TPM using a weighted moving average.
 
-### Core Systems
-- **[Queue & Retry Design](./QUEUE_AND_RETRY_DESIGN.md)** - Priority queue and smart retry system
-- **[Complete Chain Logging](./QUEUE_AND_RETRY_LOGGING.md)** - Request lifecycle logging and observability
+### Reliability & Observability
+- **Prometheus Metrics** — `/metrics` endpoint exposing request counts, token usage, queue depth, and worker utilization.
+- **Health Check** — `/health` verifies DB and cache connectivity; returns 503 on failure.
+- **Complete Chain Logging** — Full request lifecycle tracking with two-tier async logging (compact summary + full request/response bodies).
+- **Streaming Support** — Robust SSE handling with 10 MB buffer for large chunks (tool calls, structured output).
+- **Timeout Control** — Configurable max wait time per request (default 30 min). Proxy controls timeout, not the client.
 
-### Development
-- **[Code Review Report](./CODE_REVIEW_REPORT.md)** - Code quality analysis and improvement suggestions
-- **[Implementation Review](./IMPLEMENTATION_REVIEW.md)** - Implementation verification and validation
-- **[Test Templates](./TEST_TEMPLATES.md)** - Ready-to-use test code templates
-- **[Agent Guidelines](../AGENTS.md)** - Guidelines for AI-assisted development
+### Admin & Security
+- **Admin REST API** — Manage nodes, API keys, view logs and stats dynamically.
+- **Constant-Time Token Comparison** — Admin token validated with `crypto/subtle` to prevent timing attacks.
+- **Persistent Storage** — SQLite (WAL mode) for configuration and async logging with automatic retention cleanup.
+- **Pluggable Backends** — In-memory, Redis, or RabbitMQ for cache and message queue.
 
-### Internal
-- **[Progress & TODOs](./llm/progress_and_todos.md)** - Development status and future roadmap
+## Quick Start
 
----
+### Docker Compose
 
-## 🎯 Quick Navigation
+```bash
+git clone <REPO_URL>
+cd proxyllm
 
-### I want to...
+# Edit data/config.toml, data/providers.toml, data/api_keys.toml
+docker-compose -f docker/docker-compose.yml up -d
 
-**Understand the system**
-→ Start with [Architecture & Features](./guide.md)
+curl http://localhost:8011/health
+```
 
-**Deploy ProxyLLM**
-→ See [Main README](../README.md) Quick Start section
+### Binary
 
-**Understand request queuing**
-→ Read [Queue & Retry Design](./QUEUE_AND_RETRY_DESIGN.md)
+```bash
+cd src && go build -o proxyllm ./cmd/proxyllm
+./proxyllm -data ./data
+```
 
-**Debug issues**
-→ Check [Complete Chain Logging](./QUEUE_AND_RETRY_LOGGING.md)
+## Configuration
 
-**Contribute code**
-→ Review [Code Review Report](./CODE_REVIEW_REPORT.md) and [Agent Guidelines](../AGENTS.md)
+ProxyLLM is configured via TOML files in a data directory (`config.toml`, `providers.toml`, `api_keys.toml`) with environment variable overrides. Nodes and keys from config are upserted into SQLite on startup.
 
-**Write tests**
-→ Use [Test Templates](./TEST_TEMPLATES.md)
+See [`data/config.toml.example`](../data/config.toml.example) for the full annotated reference.
 
----
+Key environment variables:
 
-## 📖 Document Summaries
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PROXYLLM_SERVER_ADDR` | Listen address | `:8080` |
+| `PROXYLLM_SERVER_ADMIN_TOKEN` | Admin API bearer token | — |
+| `PROXYLLM_DB_PATH` | SQLite database path | `proxyllm.db` |
+| `PROXYLLM_CACHE_TYPE` | `memory` or `redis` | `memory` |
+| `PROXYLLM_MQ_TYPE` | `memory`, `redis`, or `rabbitmq` | `memory` |
 
-### Architecture & Features (guide.md)
-Comprehensive overview of ProxyLLM's architecture, including:
-- System components and data flow
-- Priority queue system
-- Smart retry and failover
-- Weighted load balancing
-- Rate limiting (RPM/TPM)
-- Logging and observability
-- Configuration options
+## Usage
 
-### Queue & Retry Design
-Detailed design document for the request queuing and retry system:
-- Priority-based queue implementation
-- Worker pool architecture
-- Retry logic and error classification
-- Timeout control
-- Configuration options
+Point your OpenAI SDK or HTTP client to `http://localhost:8080/v1`.
 
-### Complete Chain Logging
-Logging system design and usage:
-- Log event types and structure
-- JSON log format specification
-- Query examples
-- Error attribution
-- Monitoring integration
+### Chat Completion
 
-### Code Review Report
-Analysis of code quality:
-- Test coverage analysis
-- Identified issues (critical, medium, minor)
-- Improvement suggestions
-- Testing recommendations
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <CLIENT_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
 
-### Implementation Review
-Verification of implemented features:
-- Feature completeness check
-- Code quality assessment
-- Performance evaluation
-- Security review
-- Final approval status
+### Priority Requests
 
-### Test Templates
-Ready-to-use test code:
-- Unit test templates
-- Integration test examples
-- Test coverage guidelines
-- Best practices
+Add a `priority` field (higher = processed first, default: 0):
 
----
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <CLIENT_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Urgent!"}],
+    "priority": 10
+  }'
+```
 
-## 🔄 Document Status
+### Admin API
 
-| Document | Status | Last Updated |
-|----------|--------|--------------|
-| guide.md | ✅ Complete | 2026-03-11 |
-| QUEUE_AND_RETRY_DESIGN.md | ✅ Complete | 2026-03-11 |
-| QUEUE_AND_RETRY_LOGGING.md | ✅ Complete | 2026-03-11 |
-| CODE_REVIEW_REPORT.md | ✅ Complete | 2026-03-11 |
-| IMPLEMENTATION_REVIEW.md | ✅ Complete | 2026-03-11 |
-| TEST_TEMPLATES.md | ✅ Complete | 2026-03-11 |
-| progress_and_todos.md | ✅ Complete | 2026-03-11 |
+Requires `admin_token` from config. All endpoints under `/admin/` are read-only — nodes and keys are managed via TOML config files.
 
----
+```bash
+# View all nodes
+curl http://localhost:8080/admin/nodes \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
 
-## 🤝 Contributing
+# View all API keys (redacted)
+curl http://localhost:8080/admin/keys \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
 
-When contributing to ProxyLLM:
+# View stats
+curl http://localhost:8080/admin/stats \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
 
-1. Read [Agent Guidelines](../AGENTS.md) for development standards
-2. Check [Progress & TODOs](./llm/progress_and_todos.md) for current status
-3. Review [Code Review Report](./CODE_REVIEW_REPORT.md) for known issues
-4. Use [Test Templates](./TEST_TEMPLATES.md) when writing tests
-5. Follow the architecture described in [guide.md](./guide.md)
+# Prometheus metrics
+curl http://localhost:8080/metrics \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
+```
 
----
+## API Endpoints
 
-## 📞 Support
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `POST /v1/chat/completions` | API Key | Chat completion (streaming supported) |
+| `POST /v1/completions` | API Key | Text completion |
+| `POST /v1/embeddings` | API Key | Embeddings |
+| `POST /v1/responses` | API Key | Responses API |
+| `GET /v1/models` | API Key | List available models |
+| `GET /health` | None | Health check with DB/cache status |
+| `GET /metrics` | Admin | Prometheus metrics |
+| `GET /admin/nodes` | Admin | List all nodes |
+| `GET /admin/nodes/{id}` | Admin | Get node by ID |
+| `GET /admin/keys` | Admin | List API keys (redacted) |
+| `GET /admin/logs` | Admin | Query request logs (paginated) |
+| `GET /admin/logs/export` | Admin | Export logs as JSONL |
+| `GET /admin/logs/{trace_id}` | Admin | Get request detail |
+| `GET /admin/stats` | Admin | Aggregate stats |
+| `GET /admin/stats/timeseries` | Admin | Time-bucketed stats |
+| `GET /admin/stats/top` | Admin | Top models/keys by usage |
 
-For questions or issues:
-- Check the documentation first
-- Review [Complete Chain Logging](./QUEUE_AND_RETRY_LOGGING.md) for debugging
-- Open an issue on GitHub with relevant logs
+## Architecture
 
----
+```
+Client → HTTP Server → Auth → Priority Queue → Worker Pool → Router → Upstream LLM
+                                                    ↕              ↕
+                                              Rate Limiter    Retry/Failover
+                                                    ↕
+                                              Cache (Memory/Redis)
+```
 
-**Documentation Version**: 1.0  
-**Last Updated**: 2026-03-11
+- **Priority Queue**: Global min-heap with lazy deletion of cancelled requests. O(log N) enqueue/dequeue.
+- **Worker Pool**: Fixed concurrency (default 10). Each worker dequeues, checks rate limits, and forwards with retry.
+- **Rate Limiter**: Sliding window (weighted moving average) across global, model, and key layers.
+- **Retry**: Up to 3 attempts across different nodes. Retryable: 5xx, 429, timeout, connection errors. Non-retryable: 4xx.
+
+## Documentation
+
+- [Architecture & Features](./docs/guide.md)
+- [Queue & Retry Design](./docs/QUEUE_AND_RETRY_DESIGN.md)
+- [Chain Logging](./docs/QUEUE_AND_RETRY_LOGGING.md)
+- [Code Review Report](./docs/FULL_CODE_REVIEW.md)
+- [Changelog](./CHANGELOG.md)
+- [Agent Guidelines](./AGENTS.md) (for AI development)
+
+## Tech Stack
+
+- Go 1.24+
+- SQLite (WAL mode, via `mattn/go-sqlite3`, requires CGO)
+- Standard library `net/http` (no web framework)
+- Optional: Redis, RabbitMQ
+
+## License
+
+MIT

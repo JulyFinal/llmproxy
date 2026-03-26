@@ -1,0 +1,16 @@
+.git
+.gitignore
+.claude
+bin/
+docs/
+*.md
+*.tar.gz
+manage.sh
+docker-compose.yml
+Dockerfile
+.dockerignore
+proxyllm.db
+test_docker
+# 保留 go.mod 和 go.sum 供 Docker 构建使用
+# go.sum
+# go.mod

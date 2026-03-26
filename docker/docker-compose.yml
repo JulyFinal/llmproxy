@@ -1,0 +1,13 @@
+services:
+  proxyllm:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: proxyllm:latest
+    container_name: proxyllm
+    ports:
+      - "8011:8080"
+    volumes:
+      # 仅挂载数据目录，程序会自动找到 /app/data 并加载所有配置
+      - ../data:/app/data
+    restart: always
