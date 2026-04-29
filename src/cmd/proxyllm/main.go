@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -27,6 +28,9 @@ import (
 )
 
 func main() {
+	// ── Pretty log format ────────────────────────────────────────────────────
+	slog.SetDefault(slog.New(logging.NewPrettyHandler(os.Stdout, slog.LevelInfo)))
+
 	defaultDir := os.Getenv("PROXYLLM_DATA_DIR")
 	if defaultDir == "" {
 		// 优先探测容器环境的标准路径
@@ -184,6 +188,11 @@ func main() {
 		return result
 	}
 	limiter := ratelimit.New(cache, cfg.RateLimit, modelLimits, keyLimits)
+	slog.Info("rate limiter initialized",
+		"global_rpm", cfg.RateLimit.RPM,
+		"global_tpm", cfg.RateLimit.TPM,
+		"model_limits", fmt.Sprintf("%v", modelLimits),
+	)
 
 	// ── Queue & Worker Pool ───────────────────────────────────────────────────
 	reqQueue := queue.NewRequestQueue(cfg.Queue.MaxQueueSize)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -31,7 +32,7 @@ func (l *ChainLogger) LogRequestReceived(ctx context.Context, req *queue.Pending
 		"id", short(req.ID),
 		"model", req.ModelAlias,
 		"key", short(req.APIKeyID),
-		"ip", extractClientIP(req.Headers),
+		"ip", extractClientIP(req.Headers, req.RemoteAddr),
 	)
 }
 
@@ -250,14 +251,18 @@ func IsRetryable(errorType string) bool {
 	return retryableErrors[errorType]
 }
 
-func extractClientIP(headers http.Header) string {
+func extractClientIP(headers http.Header, remoteAddr string) string {
 	if ip := headers.Get("X-Forwarded-For"); ip != "" {
 		return strings.Split(ip, ",")[0]
 	}
 	if ip := headers.Get("X-Real-IP"); ip != "" {
 		return ip
 	}
-	return ""
+	// Fall back to direct connection IP (strip port)
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return remoteAddr
 }
 
 func short(id string) string {

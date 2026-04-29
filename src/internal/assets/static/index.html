@@ -953,14 +953,25 @@ const App = {
     const content = document.getElementById('page-content');
     const now = new Date();
     const weekAgo = new Date(now - 7*24*3600*1000);
+    const todayLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const tsRange = `start=${weekAgo.toISOString()}&end=${now.toISOString()}`;
-    const [stats, topModels, topKeys, tsHour, tsDay] = await Promise.all([
-      this.api('GET', `${this.adminBase}/stats`).catch(() => ({})),
-      this.api('GET', `${this.adminBase}/stats/top?group_by=model_alias&limit=10`).catch(() => []),
-      this.api('GET', `${this.adminBase}/stats/top?group_by=api_key_id&limit=10`).catch(() => []),
-      this.api('GET', `${this.adminBase}/stats/timeseries?granularity=hour&${tsRange}`).catch(() => []),
-      this.api('GET', `${this.adminBase}/stats/timeseries?granularity=day&${tsRange}`).catch(() => [])
-    ]);
+    const todayRange = `start=${todayLocal.toISOString()}`;
+
+    let stats = {}, topModels = [], topKeys = [], tsHour = [], tsDay = [];
+    try {
+      [stats, topModels, topKeys, tsHour, tsDay] = await Promise.all([
+        this.api('GET', `${this.adminBase}/stats?${todayRange}`).catch(() => ({})),
+        this.api('GET', `${this.adminBase}/stats/top?group_by=model_alias&limit=10&${tsRange}`).catch(() => []),
+        this.api('GET', `${this.adminBase}/stats/top?group_by=api_key_id&limit=10&${tsRange}`).catch(() => []),
+        this.api('GET', `${this.adminBase}/stats/timeseries?granularity=hour&${tsRange}`).catch(() => []),
+        this.api('GET', `${this.adminBase}/stats/timeseries?granularity=day&${tsRange}`).catch(() => [])
+      ]);
+    } catch(e) { console.error('dashboard fetch error', e); }
+    stats = stats || {};
+    topModels = topModels || [];
+    topKeys = topKeys || [];
+    tsHour = tsHour || [];
+    tsDay = tsDay || [];
     // Pick best granularity: use hourly if ≤48 points, otherwise daily
     const timeseries = (tsHour||[]).length > 0 && (tsHour||[]).length <= 48 ? tsHour : (tsDay||[]).length > 0 ? tsDay : (tsHour||[]);
     const granLabel = timeseries === tsDay ? 'daily' : 'hourly';

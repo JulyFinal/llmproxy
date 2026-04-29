@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -131,7 +132,7 @@ func (p *WorkerPool) Stop() {
 
 func (p *WorkerPool) monitor() {
 	defer p.wg.Done()
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -159,11 +160,12 @@ func (p *WorkerPool) worker(id int) {
 		if req == nil { return }
 
 		p.activeWorker.Add(1)
-		allowed, _, err := p.limiter.AllowRequest(req.Context, req.APIKeyID, req.ModelAlias)
+		allowed, rlStatus, err := p.limiter.AllowRequest(req.Context, req.APIKeyID, req.ModelAlias)
 		
 		if !allowed || err != nil {
 			p.blockedCount.Add(1)
 			p.activeWorker.Add(-1)
+			p.logger.LogRateLimitCheck(req.Context, req, false, rlStatus)
 			go func(r *queue.PendingRequest) {
 				time.Sleep(100 * time.Millisecond)
 				if r.Context.Err() == nil { p.queue.Enqueue(r) }
@@ -253,10 +255,17 @@ func (p *WorkerPool) forwardWithRetry(req *queue.PendingRequest) *domain.Executi
 		p.logger.LogNodeAttemptFailed(req.Context, req, attempt, node, fwdErr, statusCode, attemptDuration, willRetry, "")
 
 		if !willRetry {
-			// Failed all attempts: flush whatever we have in recorder
-			if !rec.commit && rec.wroteHeader {
-				rec.Commit()
-				rec.w.Write(rec.body.Bytes())
+			// Failed all attempts: write error to client if nothing was written yet
+			if !rec.commit {
+				if rec.wroteHeader {
+					rec.Commit()
+					rec.w.Write(rec.body.Bytes())
+				} else {
+					// Upstream never responded (DNS error, connection refused, etc.)
+					sc := statusCode
+					if sc == 0 { sc = http.StatusBadGateway }
+					writeWorkerError(rec.w, sc, errorType)
+				}
 			}
 			return &domain.ExecutionResult{StatusCode: statusCode, Error: errorType, ErrorType: errorType, Attempts: attempts, ExecutionMs: time.Since(startTime).Milliseconds()}
 		}
@@ -280,4 +289,21 @@ func (p *WorkerPool) buildHTTPRequest(req *queue.PendingRequest, node *domain.Mo
 	r, _ := http.NewRequestWithContext(req.Context, req.Method, req.Path, bytes.NewReader(req.BodyBytes))
 	r.Header = req.Headers.Clone()
 	return r, nil
+}
+
+func writeWorkerError(w http.ResponseWriter, status int, errorType string) {
+	msg := "service unavailable"
+	switch errorType {
+	case "dns_error", "connection_refused", "connection_reset":
+		msg = "model service unreachable"
+	case "upstream_timeout":
+		msg = "model service timeout"
+	case "upstream_5xx":
+		msg = "model service internal error"
+	case "upstream_429":
+		msg = "model service rate limited, please retry later"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	fmt.Fprintf(w, `{"error":{"message":"%s","type":"proxy_error","code":%d}}`, msg, status)
 }

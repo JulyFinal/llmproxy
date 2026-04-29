@@ -22,10 +22,11 @@ type PendingRequest struct {
 	Timestamp    time.Time // Time when enqueued
 
 	// HTTP Context & IO
-	BodyBytes []byte // Buffered request body
-	Headers   http.Header
-	Method    string
-	Path      string
+	BodyBytes  []byte // Buffered request body
+	Headers    http.Header
+	Method     string
+	Path       string
+	RemoteAddr string
 
 	// Original ResponseWriter to allow streaming straight to client
 	ResponseWriter http.ResponseWriter

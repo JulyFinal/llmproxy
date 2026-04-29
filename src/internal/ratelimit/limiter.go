@@ -5,6 +5,7 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ type Limiter struct {
 	global      domain.RateLimitConfig
 	modelLimits map[string]domain.RateLimitConfig
 	keyLimits   func(keyID string) *domain.RateLimitConfig
+	loggedLimits sync.Map // track which models we already logged
 }
 
 func New(
@@ -49,11 +51,14 @@ func (l *Limiter) AllowRequest(ctx context.Context, keyID, modelAlias string) (b
 	status := domain.RateLimitStatus{}
 
 	// Fast path: if all limits are zero (unlimited), skip all checks.
-	if l.global.RPM <= 0 && l.global.TPM <= 0 &&
-		l.modelRPM(modelAlias) <= 0 && l.modelTPM(modelAlias) <= 0 &&
-		l.keyRPM(keyID) <= 0 && l.keyTPM(keyID) <= 0 {
+	gRPM, gTPM := l.global.RPM, l.global.TPM
+	mRPM, mTPM := l.modelRPM(modelAlias), l.modelTPM(modelAlias)
+	kRPM, kTPM := l.keyRPM(keyID), l.keyTPM(keyID)
+	if gRPM <= 0 && gTPM <= 0 && mRPM <= 0 && mTPM <= 0 && kRPM <= 0 && kTPM <= 0 {
 		return true, status, nil
 	}
+	// Log which limit is active (helps debug unexpected blocks)
+	l.logActiveLimit(keyID, modelAlias, gRPM, gTPM, mRPM, mTPM, kRPM, kTPM)
 
 	now := time.Now()
 	ts := now.Unix() / 60
@@ -179,6 +184,18 @@ func (l *Limiter) Check(ctx context.Context) error {
 		return fmt.Errorf("cache read: wrote but could not read back")
 	}
 	return nil
+}
+
+func (l *Limiter) logActiveLimit(keyID, model string, gRPM, gTPM, mRPM, mTPM, kRPM, kTPM int) {
+	key := model + ":" + keyID
+	if _, loaded := l.loggedLimits.LoadOrStore(key, true); !loaded {
+		slog.Warn("⚠ LIMIT ACTIVE",
+			"key", keyID, "model", model,
+			"global", fmt.Sprintf("rpm=%d tpm=%d", gRPM, gTPM),
+			"model", fmt.Sprintf("rpm=%d tpm=%d", mRPM, mTPM),
+			"key_limit", fmt.Sprintf("rpm=%d tpm=%d", kRPM, kTPM),
+		)
+	}
 }
 
 func windowTimestamp() int64 {

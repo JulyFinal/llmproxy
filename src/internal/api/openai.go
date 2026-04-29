@@ -174,6 +174,7 @@ func (h *OpenAIHandler) forward(w http.ResponseWriter, r *http.Request, et domai
 		Headers:        r.Header,
 		Method:         r.Method,
 		Path:           r.URL.Path,
+		RemoteAddr:     r.RemoteAddr,
 		ResponseWriter: w,
 		ResultChan:     make(chan *domain.ExecutionResult, 1),
 		Context:        reqCtx,
